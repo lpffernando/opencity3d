@@ -43,6 +43,11 @@ def render_to_directory(file, output_path, width=384, height=384, max_n_samples=
     """
     mesh_glb = trimesh.load(file)
     print(f"Read mesh: ", mesh_glb)
+    # trimesh>=4 returns a Trimesh for single-mesh files; pyrender needs a Scene
+    if isinstance(mesh_glb, trimesh.Scene):
+        trimesh_scene = mesh_glb
+    else:
+        trimesh_scene = trimesh.Scene(mesh_glb)
 
     np.random.seed(42)
 
@@ -57,7 +62,7 @@ def render_to_directory(file, output_path, width=384, height=384, max_n_samples=
                                 [0, fy, cy],
                                 [0, 0, 1]])
     # Create a renderer
-    scene = pyrender.Scene.from_trimesh_scene(mesh_glb, bg_color=[1.0, 1.0, 1.0])
+    scene = pyrender.Scene.from_trimesh_scene(trimesh_scene, bg_color=[1.0, 1.0, 1.0])
     ambient_intensity = 0.8 
     scene.ambient_light = np.array([ambient_intensity, ambient_intensity, ambient_intensity])
     renderer = pyrender.OffscreenRenderer(viewport_width=width, viewport_height=height)

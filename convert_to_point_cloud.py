@@ -145,11 +145,30 @@ def get_visible_points_view(points, poses, depth_images, intrinsics, vis_thresho
     return img2points
 
 
+def _pick_feature_dir(base_path):
+    """自动选择语言特征目录: 优先 highlight/bbox 变体, 回退到默认目录."""
+    cands = [os.path.join(base_path, "language_features_highlight"),
+             os.path.join(base_path, "language_features_bbox"),
+             os.path.join(base_path, "language_features")]
+    for c in cands:
+        if os.path.isdir(c) and any(f.endswith("_f.npy") for f in os.listdir(c)):
+            print(f"[INFO] Using feature dir: {c}")
+            return c
+    return cands[-1]
+
+
 def load_data(obj_path, images_path, depth_path, feat_path, mask_path, poses_path, intrinsics_path, full_embedding_path = None, full_embeddings_mode = False, max_points=int(1*1e6)):
     
     print("[INFO] Loading the data..")
     # mesh = o3d.io.read_point_cloud(ply_path)
-    mesh = o3d.io.read_triangle_model(obj_path)
+    try:
+        mesh = o3d.io.read_triangle_model(obj_path)
+    except Exception:
+        mesh = None
+    if mesh is None or len(getattr(mesh, 'meshes', [])) == 0 and not hasattr(mesh, 'points'):
+        # fall back: pure point cloud (.ply/.xyz/.pcd) -> use its points directly
+        print("[INFO] Reading as point cloud (no triangle model)")
+        mesh = o3d.io.read_point_cloud(obj_path)
     try:
         points3D = mesh.points
     except:
@@ -245,7 +264,7 @@ def convert_to_pcd(obj_path, images_path, depth_path, feat_path, mask_path, pose
             for index, position in zip(img2points[i]["indices"], img2points[i]["projected_points"]):
                 mask_ix = masks[i][:, position[1], position[0]]
                 feat = features[i][mask_ix] * (mask_ix != -1)[: , None]
-                if feat.shape[-1] != 512:
+                if feat.shape[-1] != features[0].shape[-1]:  # 动态维数 (512=CLIP, 1152=SigLIP)
                     continue
                 else:
                     point_features_sum[:, index] += feat
@@ -258,10 +277,12 @@ def convert_to_pcd(obj_path, images_path, depth_path, feat_path, mask_path, pose
         print(f"[INFO] Minimum number of features per point: {np.min(n_observed)}")
         print(f"[INFO] Median number of features per point: {np.median(n_observed)}")
         print("[INFO] Point feature shape:", point_features_sum.shape)
-        if "highlight" in feat_path:
-            np.save("/home/bieriv/LangSplat/LangSplat/data/rotterdam-output/point_features_langbase.npy", point_features_sum)
-        else:
-            np.save("/mnt/usb_ssd/opencity-data/openscene-base/point_features_base.npy", point_features_sum)
+        # save features next to the output point cloud (原代码为写死的绝对路径, 已参数化)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        crop_type = "highlight" if "highlight" in os.path.basename(os.path.normpath(feat_path)) else "base"
+        feat_output = os.path.join(os.path.dirname(output_path), f"point_features_{crop_type}.npy")
+        np.save(feat_output, point_features_sum)
+        print(f"[INFO] Saved features to {feat_output}")
 
     if True:
         # average colors
@@ -281,41 +302,38 @@ def convert_to_pcd(obj_path, images_path, depth_path, feat_path, mask_path, pose
         point_cloud.colors = o3d.utility.Vector3dVector(point_colors_sum)
         assert point_cloud.has_points()
         assert point_cloud.has_colors()
-        o3d.io.write_point_cloud("/mnt/usb_ssd/opencity-data/openscene-base/generated_pcd_base.ply", point_cloud)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        o3d.io.write_point_cloud(output_path, point_cloud)
+        print(f"[INFO] Saved point cloud to {output_path}")
 
 
 if __name__ == "__main__":
-    if False:
-        base_path = "/home/bieriv/LangSplat/LangSplat/data/brooklyn-bridge/"
-        obj_path = "/home/bieriv/LangSplat/LangSplat/data/brooklyn-bridge-obj/brooklyn-bridge.obj"
-        full_embeddings_mode = False
-    elif True:
-        base_path = "/home/bieriv/LangSplat/LangSplat/data/rotterdam-output/"
-        obj_path = "/home/bieriv/LangSplat/LangSplat/data/rotterdam/rotterdam.obj"
-        full_embeddings_mode = True
-    elif False:
-        base_path = "/home/bieriv/LangSplat/LangSplat/data/eth-output-v1/"
-        obj_path = "/home/bieriv/LangSplat/LangSplat/data/eth/eth.glb"
-        full_embeddings_mode = False
-    elif False:
-        base_path = "/home/bieriv/LangSplat/LangSplat/data/ams-output-v2/"
-        obj_path = "/home/bieriv/LangSplat/LangSplat/data/ams/ams.glb"
-        full_embeddings_mode = False
-    elif False:
-        base_path = "/home/bieriv/LangSplat/LangSplat/data/delft-output-v1/"
-        obj_path = "/home/bieriv/LangSplat/LangSplat/data/delft/delft.glb"
-        full_embeddings_mode = False
-    else:
-        obj_path = "/home/bieriv/LangSplat/LangSplat/data/buenos-aires-squared/buenos-aires-squared-shifted.obj"
-        base_path = "/home/bieriv/LangSplat/LangSplat/data/buenos-aires-squared-output-v3/"
-        full_embeddings_mode = True
-    convert_to_pcd(obj_path = obj_path, #"scene_example_downsampled.ply",
-                    images_path= base_path + "color",
-                    depth_path = base_path + "depth",
-                    feat_path = base_path + "language_features",
-                    mask_path = base_path + "language_features",
-                    full_embedding_path = "/mnt/usb_ssd/opencity-data/openscene-base/" + "full_image_embeddings",
-                    poses_path = base_path + "pose",
-                    intrinsics_path = base_path + "intrinsic/projection_matrix.txt",
-                    output_path = "semantic_point_cloud.ply",
-                    full_embeddings_mode = full_embeddings_mode)
+    import argparse
+    parser = argparse.ArgumentParser(description="Project per-image language features onto a 3D point cloud")
+    parser.add_argument("--base-path", type=str, default=None, help="Path to the rendered scene output dir (contains color/depth/pose/intrinsic/language_features)")
+    parser.add_argument("--obj-path", type=str, default=None, help="Path to the scene mesh (.obj/.glb/.ply)")
+    parser.add_argument("--output", type=str, default="semantic_point_cloud.ply", help="Output point cloud path")
+    parser.add_argument("--full-embeddings-mode", action="store_true", help="Use baseline full-image embeddings instead of per-mask features")
+    parser.add_argument("--full-embedding-path", type=str, default=None, help="Path to full_image_embeddings dir (only with --full-embeddings-mode)")
+    parser.add_argument("--max-points", type=int, default=int(1e6), help="Max number of points used from the mesh")
+    args = parser.parse_args()
+
+    base_path = args.base_path
+    if base_path is None:
+        raise SystemExit("请用 --base-path 指定渲染输出目录 (含 color/depth/pose/intrinsic), 例如: \n"
+                         "  python convert_to_point_cloud.py --base-path /path/data/scene-output-v1 --obj-path /path/scene.obj --output eval/generated_point_cloud.ply")
+    obj_path = args.obj_path
+    if obj_path is None:
+        raise SystemExit("--obj-path 必填: 场景网格 (obj/glb/ply)")
+
+    convert_to_pcd(obj_path=obj_path,
+                    images_path=os.path.join(base_path, "color"),
+                    depth_path=os.path.join(base_path, "depth"),
+                    feat_path=_pick_feature_dir(base_path),
+                    mask_path=_pick_feature_dir(base_path),
+                    full_embedding_path=args.full_embedding_path,
+                    poses_path=os.path.join(base_path, "pose"),
+                    intrinsics_path=os.path.join(base_path, "intrinsic/projection_matrix.txt"),
+                    output_path=args.output,
+                    full_embeddings_mode=args.full_embeddings_mode,
+                    max_points=args.max_points)

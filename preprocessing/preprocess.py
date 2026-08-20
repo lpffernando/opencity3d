@@ -37,8 +37,11 @@ class SigLipNetwork:
         self.clip_n_dims = 1152
 
     def encode_text(self, texts):
+        # Fix for open_clip>=3 / torch>=2.x: tokenizer returns CPU ids, model is on GPU
+        device = next(self.model.parameters()).device
         with torch.no_grad(), torch.cuda.amp.autocast():
-            return self.model.encode_text(self.tokenizer(texts, context_length=model.context_length))
+            ids = self.tokenizer(texts, context_length=self.model.context_length).to(device)
+            return self.model.encode_text(ids)
     
     def encode_image(self,images, batch_size=128):
         pil_images =  [Image.fromarray((i*255).detach().cpu().numpy().transpose(1,2, 0).astype(np.uint8)) for i in images] # ugly af
@@ -256,13 +259,27 @@ def _embed_clip_sam_tiles(image, sam_encoder, img_cache_dir=None, level="bbox"):
     seg_images, seg_map = sam_encoder(aug_imgs, level, img_cache_dir=img_cache_dir)
 
     clip_embeds = {}
-    for level in tqdm(['default', 's', 'm', 'l'], desc="applying CLIP to crops"):
-        tiles = seg_images[level]
+    for lvl in tqdm(['default', 's', 'm', 'l'], desc="applying CLIP to crops"):
+        if lvl not in seg_images:  # 该层 mask 被 NMS/filter 全删光
+            continue
+        tiles = seg_images[lvl]
         tiles = tiles.to("cuda")
         with torch.no_grad():
             clip_embed = model.encode_image(tiles)
         clip_embed /= clip_embed.norm(dim=-1, keepdim=True)
-        clip_embeds[level] = clip_embed.detach().cpu().half()        
+        clip_embeds[lvl] = clip_embed.detach().cpu().half()
+    if len(clip_embeds) == 0:
+        # 退化情况: 所有层的 mask 都为空 -> 直接嵌入整张图
+        print("[WARN] no masks at all, embedding full image")
+        img_np = (image[0].permute(1, 2, 0).numpy()).astype(np.uint8)
+        resized = cv2.resize(img_np, (224, 224))
+        tile_t = torch.from_numpy(resized).permute(2, 0, 1)[None].float() / 255.0
+        with torch.no_grad():
+            clip_embed = model.encode_image(tile_t.to('cuda'))
+        clip_embed /= clip_embed.norm(dim=-1, keepdim=True)
+        clip_embeds['default'] = clip_embed.detach().cpu().half()
+        H, W = image[0].shape[1:]
+        seg_map = {'default': np.zeros((H, W), dtype=np.int32)}
     return clip_embeds, seg_map
 
 def get_seg_img(mask, image, mode="bbox", pad=25):
@@ -457,7 +474,20 @@ def sam_encoder(image, mode="bbox", img_cache_dir=None):
         masks_default, masks_s, masks_m, masks_l = pickle.load(open(os.path.join(img_cache_dir, "masks.pkl"), "rb"))
     else:
         # pre-compute masks
-        masks_default, masks_s, masks_m, masks_l = mask_generator.generate(image)
+        # NOTE: 官方 OpenCity3D 期望 segment-anything fork 返回 4 个 level (default/s/m/l) 的 mask 列表;
+        # pip 版 `segment-anything` 的 generate() 只返回单个列表。这里按 bbox 面积分层近似拆成 4 层。
+        masks_all = mask_generator.generate(image)
+        if len(masks_all) >= 4:
+            areas = np.array([m['bbox'][2] * m['bbox'][3] for m in masks_all])
+            order = np.argsort(areas)
+            s_, m_, l_, rest = np.array_split(order, 4)
+            masks_default = masks_all
+            masks_s = [masks_all[i] for i in s_]
+            masks_m = [masks_all[i] for i in m_]
+            masks_l = [masks_all[i] for i in np.concatenate([l_, rest])]
+        else:
+            # 退化情况: mask 太少, 各层复用同一份
+            masks_default = masks_s = masks_m = masks_l = masks_all
         # pre-compute postprocess
         masks_default, masks_s, masks_m, masks_l = \
             masks_update(masks_default, masks_s, masks_m, masks_l, iou_thr=0.8, score_thr=0.7, inner_thr=0.5)
@@ -469,6 +499,10 @@ def sam_encoder(image, mode="bbox", img_cache_dir=None):
     def mask2segmap(masks, image, mode):
         seg_img_list = []
         seg_map = -np.ones(image.shape[:2], dtype=np.int32)
+        if len(masks) == 0:
+            # 空层退化: 用整图作为一个 mask, 保证 4 个 level 的 key 恒存在
+            masks = [{'segmentation': np.ones(image.shape[:2], dtype=bool),
+                      'bbox': [0, 0, image.shape[1], image.shape[0]]}]
         for i in tqdm(range(len(masks)), desc="generating mask crops"):
             mask = masks[i]
             seg_img = get_seg_img(mask, image, mode=mode)
@@ -483,12 +517,9 @@ def sam_encoder(image, mode="bbox", img_cache_dir=None):
     
     seg_images, seg_maps = {}, {}
     seg_images['default'], seg_maps['default'] = mask2segmap(masks_default, image, mode=mode)
-    if len(masks_s) != 0:
-        seg_images['s'], seg_maps['s'] = mask2segmap(masks_s, image, mode=mode)
-    if len(masks_m) != 0:
-        seg_images['m'], seg_maps['m'] = mask2segmap(masks_m, image, mode=mode)
-    if len(masks_l) != 0:
-        seg_images['l'], seg_maps['l'] = mask2segmap(masks_l, image, mode=mode)
+    seg_images['s'], seg_maps['s'] = mask2segmap(masks_s, image, mode=mode)
+    seg_images['m'], seg_maps['m'] = mask2segmap(masks_m, image, mode=mode)
+    seg_images['l'], seg_maps['l'] = mask2segmap(masks_l, image, mode=mode)
 
     return seg_images, seg_maps
 

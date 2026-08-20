@@ -23,7 +23,8 @@ def get_encode_fn(model_type):
 
     def encode_text(texts, model, tokenizer):
         model.eval()
-        texts_tok = tokenizer(texts, context_length=model.context_length)
+        device = next(model.parameters()).device
+        texts_tok = tokenizer(texts, context_length=model.context_length).to(device)
         with torch.no_grad(), torch.cuda.amp.autocast():
             return model.encode_text(texts_tok).cpu().detach().numpy().astype(np.float16).T
     return model, tokenizer, encode_text
