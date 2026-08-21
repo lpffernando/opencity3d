@@ -239,3 +239,66 @@ CAM_Z=3000, zfar=6000, znear=1 → depth = 1.999 - 0.0006351·z
 - ⚠️ 植被/道路识别率受 SigLIP 训练数据限制，需要：
   - 更细粒度的标注 prompt（"satellite view of green park", "concrete sidewalk"）
   - 或更换为遥感专用模型
+
+
+## 8. 上海虹桥商务区 b3dm 倾斜摄影（Elements SE 移动硬盘）
+
+> 📅 位置: `/media/fernando/Elements SE/倾斜摄影数据/上海虹桥商务区/hongqiao-3DTiles/`
+> `Scene/Data/` 下 24GB、128K b3dm、261 个 Tile 格网，ContextCapture 老格式。
+
+### 8.1 数据特性
+
+| 维度 | 详情 |
+|---|---|
+| 格式 | **b3dm** = 28B b3dm 头 + **glTF 1.0** glb + `KHR_binary_glTF` + `CESIUM_RTC` |
+| 坐标系 | **ECEF**（WGS84 地心），accessor min/max ±27m 局部 + RTC center 偏移到真实坐标 |
+| LOD | 每格网 79 文件：顶层 `Tile_pXXX_pYYY.b3dm` + L16~L23 逐级细分 |
+| 几何 | **真实三维体**（含侧墙，法线 non-z 占 64%，不是薄片）|
+| 纹理 | 图集（atlas），**整体偏暗**（ContextCapture 低曝光，p50≈0 半黑占位）|
+| 布局 | 中心商务区约 800m(E)×2300m(N) 纵向长条，格网 E 列/ N 行间距 62-70m |
+
+### 8.2 关键脚本
+
+- `dataset_generation/parse_b3dm.py` — **手写 glTF1.0 解析器**（b3dm→Trimesh，含图集纹理/UV/RTC）：
+  - 关键：glTF1 glb 的 binary 从 `20+jsonlen` 开始（**无 4 字节对齐**）
+  - `buffers["binary_glTF"]` + `bufferViews` 按 byteOffset 读顶点/UV/索引/JPEG
+  - 材质 `mat_[technique].values.tex` → `textures.tex_0.source` → `images.img_0[KHR_binary_glTF].bufferView`
+- `dataset_generation/build_hongqiao.py` — ECEF→ENU 局部平面，合并 16 格网顶层
+- `dataset_generation/render_hongqiao_ortho.py` — ortho 俯视瓦片 + **percentile+gamma 对比度增强**（补偿暗纹理）
+- `dataset_generation/convert_hongqiao.py` — 几何 top-down 可见性（每像素列最高 z 顶点可见），绕开 pyrender depth 校准
+- `sandbox/hongqiao_query.py` — per-level 特征 × 多 prompt 相似度查询
+
+### 8.3 关键难点教训（glTF 1.0）
+
+1. glTF1 glb 无 4 字节 binary 对齐，`bin_start = 20+jsonlen`，一旦偏移错 1 字节 JPEG 全损
+2. CESIUM_RTC center 必须 `extensions.CESIUM_RTC.center` 加到局部 accessor
+3. glTF1 material→texture→image 是**字符串键**三级跳，不是 glTF2 的数字索引
+4. `OrthographicCamera` 的 znear/zfar 贴近物体范围时 depth 才 1:1 线性（斜率 -1.01），否则近裁剪会把地面(z<-63)裁掉
+5. pyrender ortho depth 在 znear=1 时**极低分辨率**（值 1.138~1.142 压缩），不可用于 z 反算 → 改用**几何最高 z** 判断俯视遮挡
+
+### 8.4 虹桥端到端结果（4×4 = 16 格网，319m×255m）
+
+| 指标 | 值 |
+|---|---|
+| 点云 | 39,953 顶点，E[-49,270] N[-22,233] z[-52,58] |
+| 特征覆盖 | **99.0%**（几何 top-down 可见性，远好于杭州 33%）|
+| 非零特征 | L0-L3 均 94-99%（远好于上海白膜 10.4%）|
+
+**SigLIP 语义结果受限**（同杭州俯视图固有局限 + 虹桥纹理更暗）：
+- 绝对相似度极低（building/road/vegetation 均 0.03-0.05），噪声大
+- 理想全归类 empty（conf≤0.05）
+
+**可靠提取**（几何 + 真彩色，不依赖 SigLIP）：
+- `eval/hongqiao/hongqiao_rgb.ply` — 真彩色点云（亮灰 75.6% 建筑/路面，绿 3.9% 植被）
+- `eval/hongqiao/area_analysis.png` — 顶视图真彩色 + 高度热力图 + 高度直方图 + 剖面
+- 建筑 >20m 占 16.6%
+
+### 8.5 结论
+
+- ✅ **b3dm(glTF1.0) → ENU → 真三维 mesh → ortho 渲染 → 特征 → 点云** 全链路跑通
+- ✅ 几何/真彩色/城建结构（面积、高度、密度）**可靠可用**
+- ⚠️ **语义判别受双重限制**：
+  1. SigLIP 对 ortho 俯视图绝对相似度低（建筑/道路/植被无法区分）**——换 GeoCLIP/SatCLIP 可解**
+  2. 虹桥 ContextCapture 纹理偏暗（部分半黑）——需更强增强或选亮区
+
+> 若目标是"开放词汇语义"，虹桥/杭州数据都建议换遥感视觉编码器；若目标是"几何城建分析"，虹桥可直接产出。
