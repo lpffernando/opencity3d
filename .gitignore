@@ -1,16 +1,21 @@
-# 大体积/生成物: 不推送到 git
+# ===== 数据 / 处理产物: 一律不进 git =====
+
+# 大体积生成物
 venv/
 ckpts/
-data/
 __pycache__/
 *.pyc
 
-# eval: 只推 PNG 图, 忽略大二进制
-eval/**/*.ply
-eval/**/*.npy
-eval/**/*.npz
+# 源数据 + 处理过程中的数据 + 渲染/特征/点云
+data/
 
-# 通用大文件
+# 全部评估/分析产物 (点云 *.ply, 特征 *.npy, 可视化 *.png/*.jpg, 交互式 *.html)
+eval/
+
+# 可视化服务
+vizserve/
+
+# 通用大二进制
 *.glb
 *.obj
 *.ply
@@ -18,3 +23,5 @@ eval/**/*.npz
 *.npz
 *.h5
 *.hdf5
+*.zip
+*.bin
